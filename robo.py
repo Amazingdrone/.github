@@ -23,13 +23,16 @@ def clean_currency(x):
 
 def processar_tabela(caminho_arquivo):
     """Realiza os cálculos da tabela 'Como Vem' para 'Como Tem Que Ficar'"""
-    print(f"Lendo arquivo: {caminho_arquivo}")
+    print(f"Lendo arquivo para processamento: {caminho_arquivo}")
     try:
-        df = pd.read_csv(caminho_arquivo, sep=';')
+        # Tenta ler com diferentes encodings caso o CSV venha com acentos do Windows
+        try:
+            df = pd.read_csv(caminho_arquivo, sep=';', encoding='latin1')
+        except:
+            df = pd.read_csv(caminho_arquivo, sep=';', encoding='utf-8')
     except:
         df = pd.read_excel(caminho_arquivo)
         
-    # Ajusta nome da coluna se vier como 'Codigo'
     if 'Codigo' in df.columns:
         df = df.rename(columns={'Codigo': 'Código'})
         
@@ -48,28 +51,27 @@ def processar_tabela(caminho_arquivo):
     # Formatação final (Padrão Brasileiro)
     df_final = pd.DataFrame()
     df_final['Código'] = df['Código']
-    df_final['Segmento'] = df['Segmento'].str.replace('Veiculos', 'Veículos')
+    df_final['Segmento'] = df['Segmento'].astype(str).str.replace('Veiculos', 'Veículos')
     df_final['Administradora'] = df['Administradora']
     df_final['Crédito R$'] = df['Crédito Num'].apply(lambda x: f"{x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     df_final['Entrada R$'] = df['Entrada Num'].apply(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     df_final['% Entrada'] = df['% Entrada'].apply(lambda x: f"{x:,.2f}%".replace(".", ","))
-    df_final['Parcelas'] = df['Parcelas Num'].astype(int)
+    df_final['Parcelas'] = df['Parcelas Num'].fillna(0).astype(int)
     df_final['Valor das Parcelas'] = df['Valor Parcela Num'].apply(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     df_final['Total das parcelas'] = df['Total das parcelas'].apply(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     df_final['Custo Total'] = df['Custo Total'].apply(lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", "."))
     df_final['% Total'] = df['% Total'].apply(lambda x: f"{x:,.2f}%".replace(".", ","))
 
-    # Salva o arquivo final
     caminho_final = os.path.join(PASTA_ATUAL, "tabela_do_dia.xlsx")
     df_final.to_excel(caminho_final, index=False)
-    print(f"Planilha 'tabela_do_dia.xlsx' gerada com sucesso!")
+    print(f"Sucesso! 'tabela_do_dia.xlsx' gerada.")
 
 def baixar_planilha():
-    """Acessa o site e clica no botão ignorando sobreposições (Cookies/Banners)"""
     options = webdriver.ChromeOptions()
     options.add_argument('--headless')
     options.add_argument('--no-sandbox')
     options.add_argument('--disable-dev-shm-usage')
+    options.add_argument('--window-size=1920,1080') # Garante que o botão não fique escondido
     
     prefs = {"download.default_directory": PASTA_ATUAL, "download.prompt_for_download": False}
     options.add_experimental_option("prefs", prefs)
@@ -78,32 +80,55 @@ def baixar_planilha():
     
     try:
         driver.get("https://cartascontempladas.com.br/ver-todas-as-cartas-contempladas/")
-        wait = WebDriverWait(driver, 20)
+        wait = WebDriverWait(driver, 30)
         
-        # XPath do link de download
+        # 1. Tenta remover o banner de cookies via JavaScript para limpar o caminho
+        try:
+            driver.execute_script("""
+                var cookies = document.querySelectorAll('[class*="cc-"], [id*="cookie"], [class*="cookie"]');
+                for (var i=0; i < cookies.length; i++) { cookies[i].remove(); }
+            """)
+            print("Tentativa de remover banners de cookies realizada.")
+        except:
+            pass
+
+        # 2. Localiza o botão usando o seu XPath
         xpath_do_botao = '//*[@id="preTabelaCartas"]/div/div[2]/div[1]/a'
-        
-        # Localiza o elemento
         botao = wait.until(EC.presence_of_element_located((By.XPATH, xpath_do_botao)))
         
-        # CLIQUE VIA JAVASCRIPT: Resolve o erro ElementClickIntercepted
+        # 3. Rola a tela até o botão
+        driver.execute_script("arguments[0].scrollIntoView(true);", botao)
+        time.sleep(2)
+
+        # 4. Clique forçado via JavaScript (o mais potente)
         driver.execute_script("arguments[0].click();", botao)
-        print("Clique realizado com sucesso via script.")
+        print("Clique forçado executado.")
         
-        # Aguarda o download completar
-        time.sleep(15)
+        # 5. Espera o download
+        time.sleep(20)
         
-        # Busca o arquivo baixado
         arquivos = glob.glob(os.path.join(PASTA_ATUAL, '*.*'))
-        # Filtra para não pegar a própria tabela final
         planilhas = [f for f in arquivos if 'tabela_do_dia' not in f and (f.endswith('.csv') or f.endswith('.xlsx'))]
         
         if planilhas:
             arquivo_recente = max(planilhas, key=os.path.getctime)
             processar_tabela(arquivo_recente)
-            os.remove(arquivo_recente) # Deleta o original para manter o GitHub limpo
+            os.remove(arquivo_recente)
         else:
-            print("Erro: O arquivo não foi encontrado após o download.")
+            # Caso o clique no link não tenha funcionado, tenta clicar na imagem interna
+            print("Tentando clique alternativo na imagem...")
+            img_botao = driver.find_element(By.XPATH, '//*[@id="preTabelaCartas"]/div/div[2]/div[1]/a/figure/img')
+            driver.execute_script("arguments[0].click();", img_botao)
+            time.sleep(20)
+            # Re-checa arquivos
+            arquivos = glob.glob(os.path.join(PASTA_ATUAL, '*.*'))
+            planilhas = [f for f in arquivos if 'tabela_do_dia' not in f and (f.endswith('.csv') or f.endswith('.xlsx'))]
+            if planilhas:
+                arquivo_recente = max(planilhas, key=os.path.getctime)
+                processar_tabela(arquivo_recente)
+                os.remove(arquivo_recente)
+            else:
+                print("Erro: Planilha não encontrada.")
             
     finally:
         driver.quit()
